@@ -2,6 +2,13 @@ import socket
 import time
 import select
 import sys
+import threading
+
+#PARAMETERS
+chunk_size = 1494 #Client1 : 1494
+N = 25 # window of size N --> given by client's rcvw size --> amout of in flight packets allowed
+A = 0.125 #Typical value --> α = 0.125
+B = 0.25 #typically, β = 0.25
 
 
 
@@ -44,7 +51,7 @@ def three_way_handshake(publicSock,udp_client_addr,PRIVATE_PORT):
         publicSock.sendto(message, udp_client_addr )
 
         #wait for "ACK"
-        data, addr = publicSock.recvfrom(1024)
+        data, _ = publicSock.recvfrom(1024)
         if data == b"ACK\x00":
             print("Connection confirmed")
             print("\n")
@@ -80,9 +87,10 @@ def inputPort():
 #Get File, segment it and append a 6 octet sequence number
 def segment_file(file_name):
     segments = []
+    
     try :
         with open(file_name,"rb") as f:
-            chunck = f.read(1018)
+            chunck = f.read(chunk_size)#1018
             segment = b"000001"+chunck
             segments.append(segment)
             i=1
@@ -102,9 +110,11 @@ def segment_file(file_name):
                     header = b"00"+str(i).encode()
                 elif(i<100000):
                     header = b"0"+str(i).encode()
+                elif(i<1000000):
+                    header = b""+str(i).encode()
 
                 #read next chunck and append it on the array
-                chunck = f.read(1018)
+                chunck = f.read(chunk_size)
                 segment = header + chunck
                 segments.append(segment)
 
@@ -118,6 +128,8 @@ def segment_file(file_name):
 #---------------------------------------------------------------------------
 #Send Each segment and wait for ack or send it again
 def send_segments_stop_go(segments,dataSock, addr ):
+    
+    timeout_time = 1
 
     # Send all segments to client
     for segment in segments:
@@ -126,7 +138,7 @@ def send_segments_stop_go(segments,dataSock, addr ):
         while WaitingAck :
 
             # Sockets from which we expect to read, timeout in seconds
-            timeout_in_seconds = 0.1
+            timeout_in_seconds = timeout_time
             inputs = [ dataSock ]
 
             # Send message, start chronometer
@@ -149,10 +161,248 @@ def send_segments_stop_go(segments,dataSock, addr ):
     # Send "FIN" to client
     message = b"FIN"
     dataSock.sendto(message, addr )
-    
 
 
+
+
+
+
+#----------------------------------------------------------------------------
+#Timeout handler : when timer expires, retransmit all unacked packets and restart timer
+class segment_timer(object):
+
+    def __init__(self, interval, segments, dataSock, addr):
+        self._interval = interval
+        self.segments = segments
+        self.dataSock = dataSock
+        self.addr = addr
+        self.t = threading.Timer(self._interval, self.callback)
+
+    def start(self, send_base, nextseqnum):
+        self.t.cancel()
+        self.t = threading.Timer(self._interval, self.callback, [send_base, nextseqnum])
+        self.t.start()
+
+    def cancel(self):
+        self.t.cancel()
+
+    def callback(self, send_base, nextseqnum):
+        self.start(send_base, nextseqnum)
+        for i in range(send_base,nextseqnum):
+            segment = self.segments[i-1]
+            self.dataSock.sendto(segment, self.addr )
+            print("segment sended after timeout"+str(i))
+
+
+
+#--------------------------------------------------------------------------------------------
+#                                   CONGESTION PROTOCOLS
+#--------------------------------------------------------------------------------------------
+
+
+acks = []
+#--------------------------------------------------------------------------
+#Fast retransmit : retransmit smallest seq num segment if 4 same acks received
+#TO CHANGE AS I WANT
+def fast_rtx(ackSegSeqNum,send_base,dataSock,addr):
+    """
+    • Retransmit lost packet
+    • Calculate FlightSize= min(rwnd,cwnd)
+    • ssthresh = FlightSize/2
+    • Enter Slow Start: cwnd = 1
+    """
+    if ackSegSeqNum == send_base-1:
+        acks.append(ackSegSeqNum)
+    elif ackSegSeqNum >= send_base :
+        acks.clear()
+    if acks.count(ackSegSeqNum) == 4:
+        segment = segments[send_base-1]
+        dataSock.sendto(segment, addr )
+        print("RTX-----------------"+str(ackSegSeqNum))
+        #reset time_out timer???????
     
+    
+def slow_start():
+    pass
+    """
+    • Start with cwnd= 1
+    • For every received ACK: cwnd= cwnd+ 1
+    ssthresh : Decides the moment when the host goes from Slow Start to Congestion Avoidance
+        Arbitrary initial value (usually very high)
+        • After a lost segment (detected through a timeout or
+        duplicate ACK): ssthresh= FlightSize/2
+        • After the retransmission: cwnd = 1
+    """
+
+def congestion_avoidance():
+    pass
+    """
+    • Once a congestion has been detected, the transmitter
+    tries to avoid reaching the congested state once again
+    • The slow cwnd increase can delay the next
+    congestion, while still testing for transmission
+    opportunities
+    • The TCP host enters in this mode when cwnd > ssthresh
+    • cwnd = cwnd + 1/cwnd
+    """
+
+def fast_recovery():
+    pass
+    """
+    • Entering Slow Start is not optimal in reception of duplicate ACKs
+    • The mechanism allows for higher throughput in case of moderate congestion
+    • Complement of Fast Retransmit
+    • Mode entered after 3 duplicate ACKs
+    • As usual, set ssthresh= FlightSize/2
+    • Retransmit lost packet
+    • Window inflation: cwnd= ssthresh + ndup (number of
+    duplicate ACKs received)
+    • This allows the transmission of new segments
+    • Window deflation: after the reception of the missing
+    ACK (one RTT later) ??????
+    • Skip Slow Start, enter Congestion Avoidance
+    """
+
+def selective_acknowledgements():
+    pass
+    """
+    (selective repeat in postech class)
+    The receiver can only acknowledge contiguous segments
+    • Ideally, the sender should retransmit only the missing
+    segments
+    • With SACK, the receiver provides this feed-back to the
+    sender
+    """
+
+
+#----------------------------------------------------------------------------------------
+#                           TCP PROTOCOLS
+#----------------------------------------------------------------------------------------
+
+cwnd = 0
+#---------------------------------------------------------------------------
+#Send Each segment and wait for ack or send it again, with TX window (cumulative ack: CBN)
+def send_segments_GBN(segments,dataSock, addr ):
+    
+    #pointers to seq number
+    send_base = 1 # first segment that is in flight
+    nextseqnum = 1 # first usable segment not yet sent
+
+    #For timeout
+    RTT_time = [int for i in range(len(segments))]
+    inTime = time.perf_counter()
+    SampleRTT = 1
+    EstimatedRTT = 1
+    DevRTT = 0
+    timeout_time = 1
+
+
+    dataToSend = True
+    envoieFin = False
+    while dataToSend:
+
+        #TIMEOUT EVENT
+        offTime = time.perf_counter()
+        if offTime - inTime > timeout_time :
+            inTime = time.perf_counter()
+            for i in range(send_base,nextseqnum):
+                segment = segments[i-1]
+                dataSock.sendto(segment, addr )
+                print("segment sended after timeout"+str(i))
+
+        #reset list of file descriptors
+        inputs = [ dataSock ]
+        outputs = [ dataSock ]
+
+        #unblocking poll of sockets
+        readable, writable, _ = select.select(inputs, outputs, [], 0)
+        
+        #RECEIVING SEGMENTS
+        if len(readable)!=0:
+            ackSegment, addr = dataSock.recvfrom(9)
+            ackSegSeqNum = int(ackSegment[3:])
+            fast_rtx(ackSegSeqNum,send_base,dataSock,addr)#<== FAST RTX 0m3,939s
+            if ackSegSeqNum == len(segments)-1:
+                #si l'ackitement reçu est l'avant dernier numéro de seq
+                envoieFin = True
+                print("Last Segment was acked : %s, file transission completed" % ackSegSeqNum)
+            elif ackSegSeqNum >= send_base:
+                send_base = ackSegSeqNum + 1
+                print("received ack: %s | send_base: %s" % (ackSegment[3:],send_base))
+                SampleRTT = time.perf_counter() - RTT_time[ackSegSeqNum-1]
+                if send_base == nextseqnum :
+                    #si on a tout reçu
+                    inTime = 0
+                else:
+                    #si il y a toujours des packet in flight
+                    # PB : SAMPLE RTT FOR SPECIFIC SEQ NUM, NOT INTO ACCOUNT TIMEOUTE
+                    inTime = time.perf_counter()
+                
+        
+        #SENDING SEGMENTS
+        if len(writable)!=0 :
+            if envoieFin :
+                #si tout les segments ont été reçu
+                message = b"FIN"
+                dataSock.sendto(message, addr )
+                dataToSend = False
+                print("FIN sended")
+            elif nextseqnum == len(segments) + 1:
+                #si tou les segments ont été envoyés
+                pass
+            elif nextseqnum < send_base + min(N,cwnd):
+                #si le prochain segment à envoyer est inférieur à la taille de fenêtre + premier seq de in flight seg
+                segment = segments[nextseqnum-1]
+                dataSock.sendto(segment, addr )
+                RTT_time[nextseqnum-1] = time.perf_counter()
+                if(send_base == nextseqnum):
+                    #si le sgment avant de celui qu'on va envoyer a été ecquité (aucun in flight segment)
+                    inTime = time.perf_counter()
+                nextseqnum = nextseqnum + 1
+                print("Seg sended. Nextseqnum: "+str(nextseqnum))
+            else:
+                pass#refuse data
+        
+        
+        #TIMEOUT CHANGEMENT:
+        #RTT estimation : SampleRTT: measured time from segment transmission until ACK receipt, ignore retransmissions
+        EstimatedRTT = (1 - A)*EstimatedRTT + A*SampleRTT
+        #safety margin : estimate SampleRTT deviation from EstimatedRTT
+        DevRTT = (1-B)*DevRTT +B*abs(SampleRTT-EstimatedRTT)
+        #timeout to use is the sum of both : 
+        timeout_time = EstimatedRTT + 4*DevRTT
+        
+        #if receive 4 same acks : rtx seg with seq num = ack +1 | resend unacked segment with smallest seq num
+        #FAST RETRANSMIT
+        
+
+
+
+    """
+    #OPTION 1
+    #send everything in the tx window in a first time, activate timeout in the last seq
+    for i,segment in enumerate(transmission_window):
+        seqNumber = segment.header()
+        dataSock.sendto(segment, addr )
+        if i == (len(transmission_window)-1) :
+            segment_timeout.start()
+        expectedseqnum = seqNumber
+    
+    while True:
+        readable = select(input, 0) #non blockant, polling
+            if readable[0] is dataSock :
+                ackedSeq = recvfrom()
+                ackedSeqNum = ackedSeq.header()
+                if ackedSeqNum == expectedseqnum :
+                    segment_timeout.cancel()
+                    dataSock.sendto(segments[ackedSeqNum], addr )
+                    segment_timeout.start()
+                    expectedseqnum = ackedSeqNum + 1
+                    send_base = ackedSeqNum
+    """
+        
+        
+     
 
     
 
@@ -213,7 +463,40 @@ if __name__ == "__main__":
 
         #send each file in "Stop-and-Go" algorithm
         print("sending file to client")
-        send_segments_stop_go(segments,dataSock,addr)
+        #send_segments_stop_go(segments,dataSock,addr)
+        send_segments_GBN(segments, dataSock, addr)
+        # pb : he finishes before receiving the last ack
+       
+
+        """
+        #test timer
+        segment_timeout = segment_timer(3, segments, dataSock, addr )
+        segment_timeout.start(1,8)
+        time.sleep(7)
+        segment_timeout.start(3,10)
+        
+       
+        #test client
+        dataSock.sendto(segments[0],addr)
+        time.sleep(1)
+        dataSock.sendto(segments[1],addr)
+        time.sleep(1)
+        dataSock.sendto(segments[2],addr)
+        time.sleep(1)
+        dataSock.sendto(segments[3],addr)
+        time.sleep(1)
+        dataSock.sendto(segments[4],addr)
+        time.sleep(1)
+        dataSock.sendto(segments[6],addr)
+        time.sleep(1)
+        dataSock.sendto(segments[7],addr)
+        time.sleep(1)
+        dataSock.sendto(segments[8],addr)
+        time.sleep(1)
+        dataSock.sendto(segments[5],addr)
+        time.sleep(1)
+        """
+
         
     
         
