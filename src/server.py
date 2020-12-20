@@ -5,11 +5,12 @@ import sys
 import threading
 
 #PARAMETERS
-chunk_size = 1494 #Client1 : 1494
-N = 25 # window of size N --> given by client's rcvw size --> amout of in flight packets allowed
+chunk_size = 1494 #Client1 : 1494 sinon pas bon
+N = 50 # window of size N --> given by client's rcvw size --> amout of in flight packets allowed
 A = 0.125 #Typical value --> α = 0.125
 B = 0.25 #typically, β = 0.25
 
+#Debug : mumtithread!!
 
 
 #-------------------------------------------------------------------------------------------
@@ -195,120 +196,164 @@ class segment_timer(object):
 
 
 
-#--------------------------------------------------------------------------------------------
-#                                   CONGESTION PROTOCOLS
-#--------------------------------------------------------------------------------------------
 
-
-acks = []
-#--------------------------------------------------------------------------
-#Fast retransmit : retransmit smallest seq num segment if 4 same acks received
-#TO CHANGE AS I WANT
-def fast_rtx(ackSegSeqNum,send_base,dataSock,addr):
-    """
-    • Retransmit lost packet
-    • Calculate FlightSize= min(rwnd,cwnd)
-    • ssthresh = FlightSize/2
-    • Enter Slow Start: cwnd = 1
-    """
-    if ackSegSeqNum == send_base-1:
-        acks.append(ackSegSeqNum)
-    elif ackSegSeqNum >= send_base :
-        acks.clear()
-    if acks.count(ackSegSeqNum) == 4:
-        segment = segments[send_base-1]
-        dataSock.sendto(segment, addr )
-        print("RTX-----------------"+str(ackSegSeqNum))
-        #reset time_out timer???????
     
-    
-def slow_start():
-    pass
-    """
-    • Start with cwnd= 1
-    • For every received ACK: cwnd= cwnd+ 1
-    ssthresh : Decides the moment when the host goes from Slow Start to Congestion Avoidance
-        Arbitrary initial value (usually very high)
-        • After a lost segment (detected through a timeout or
-        duplicate ACK): ssthresh= FlightSize/2
-        • After the retransmission: cwnd = 1
-    """
 
-def congestion_avoidance():
-    pass
-    """
-    • Once a congestion has been detected, the transmitter
-    tries to avoid reaching the congested state once again
-    • The slow cwnd increase can delay the next
-    congestion, while still testing for transmission
-    opportunities
-    • The TCP host enters in this mode when cwnd > ssthresh
-    • cwnd = cwnd + 1/cwnd
-    """
 
-def fast_recovery():
-    pass
-    """
-    • Entering Slow Start is not optimal in reception of duplicate ACKs
-    • The mechanism allows for higher throughput in case of moderate congestion
-    • Complement of Fast Retransmit
-    • Mode entered after 3 duplicate ACKs
-    • As usual, set ssthresh= FlightSize/2
-    • Retransmit lost packet
-    • Window inflation: cwnd= ssthresh + ndup (number of
-    duplicate ACKs received)
-    • This allows the transmission of new segments
-    • Window deflation: after the reception of the missing
-    ACK (one RTT later) ??????
-    • Skip Slow Start, enter Congestion Avoidance
-    """
 
-def selective_acknowledgements():
-    pass
-    """
-    (selective repeat in postech class)
-    The receiver can only acknowledge contiguous segments
-    • Ideally, the sender should retransmit only the missing
-    segments
-    • With SACK, the receiver provides this feed-back to the
-    sender
-    """
+
 
 
 #----------------------------------------------------------------------------------------
 #                           TCP PROTOCOLS
 #----------------------------------------------------------------------------------------
+#Client 1 : a lot of delay, timeout time plays important role! No slow start ontherwise always cwnd of 1 : we send fast but receive slowly
 
-cwnd = 0
+
 #---------------------------------------------------------------------------
 #Send Each segment and wait for ack or send it again, with TX window (cumulative ack: CBN)
-def send_segments_GBN(segments,dataSock, addr ):
+def GBN(segments,dataSock, addr ):
     
+    #------------------------GLOBAL VARIABLES------------------------------------------------------------------
     #pointers to seq number
     send_base = 1 # first segment that is in flight
     nextseqnum = 1 # first usable segment not yet sent
 
     #For timeout
-    RTT_time = [int for i in range(len(segments))]
+    #RTT_time = [int for i in range(len(segments))]
+    RTT_time = 0
     inTime = time.perf_counter()
-    SampleRTT = 1
-    EstimatedRTT = 1
+    SampleRTT = 0
+    EstimatedRTT = 0
     DevRTT = 0
-    timeout_time = 1
+    timeout_time = 10
 
-
+    #to stop sending once we are done
     dataToSend = True
     envoieFin = False
+
+    #Congestion variables
+    sstresh = 1000
+    acks = []
+    cwnd = 1000 #Slow start : start with cwnd = 1
+    #-----------------------------------------------------------------------------------------------------------
+
+
+
+
+
+    #-------------------------------------CONGESTION PROTOCOLS--------------------------------------------------
+    def fast_rtx(ackSegSeqNum):
+        """
+        • Retransmit lost packet
+        • Calculate FlightSize= min(rwnd,cwnd)
+        • ssthresh = FlightSize/2
+        • Enter Slow Start: cwnd = 1
+        """
+        if ackSegSeqNum == send_base-1:
+            acks.append(ackSegSeqNum)
+        elif ackSegSeqNum >= send_base :
+            acks.clear()
+        if acks.count(ackSegSeqNum) == 3: #==
+            segment = segments[send_base-1]#send_base-1
+            dataSock.sendto(segment, addr )
+            print("PACKET LOST DETECTION : FAST RETRANSMIT | Segment Received:"+str(ackSegSeqNum)+" | Segment To reSend:"+str(segment[0:6]) )
+            lost_packet_handler()
+            #reset time_out timer???????
+            #reset timer
+
+    
+    def timeout_estimation():
+        nonlocal EstimatedRTT
+        nonlocal SampleRTT
+        nonlocal DevRTT
+        nonlocal timeout_time
+
+        #RTT estimation : SampleRTT: measured time from segment transmission until ACK receipt, ignore retransmissions
+        EstimatedRTT = (1 - A)*EstimatedRTT + A*SampleRTT
+        #safety margin : estimate SampleRTT deviation from EstimatedRTT
+        DevRTT = (1-B)*DevRTT +B*abs(SampleRTT-EstimatedRTT)
+        #timeout to use is the sum of both : 
+        timeout_time = EstimatedRTT + 4*DevRTT
+
+
+
+    def lost_packet_handler():
+        """
+        If a packet is considered lost(options):
+            1) enter slow start
+        """
+        GBN.sstresh = int((nextseqnum-send_base)/2)
+        #GBN.cwnd = 1
+
+
+    
+    def slow_start(ackSegSeqNum):
+        """
+        • Start with cwnd= 1
+        • For every received ACK: cwnd= cwnd+ 1
+        ssthresh : Decides the moment when the host goes from Slow Start to Congestion Avoidance
+            Arbitrary initial value (usually very high)
+            • After a lost segment (detected through a timeout or
+            duplicate ACK): ssthresh= FlightSize/2
+            • After the retransmission: cwnd = 1
+        """
+        if (cwnd <= sstresh) & (ackSegSeqNum >= send_base):
+            GBN.cwnd = cwnd + 1
+            print("DEBUG : SLOW START | cwnd:"+str(cwnd)+" | sstrsh:"+str(sstresh))
+
+
+
+        
+    def congestion_avoidance(ackSegSeqNum):
+        """
+        • Once a congestion has been detected, the transmitter
+        tries to avoid reaching the congested state once again
+        • The slow cwnd increase can delay the next
+        congestion, while still testing for transmission
+        opportunities
+        • The TCP host enters in this mode when cwnd > ssthresh
+        • cwnd = cwnd + 1/cwnd
+        """
+        if (cwnd > sstresh) & (ackSegSeqNum >= send_base):
+            GBN.cwnd = cwnd + 1/cwnd
+            print("DEBUG : CONGESTION AVOIDANCE | cwnd:"+str(cwnd)+" | sstrsh:"+str(sstresh))
+        
+    
+    def fast_recovery():
+        pass
+        """
+        • Entering Slow Start is not optimal in reception of duplicate ACKs
+        • The mechanism allows for higher throughput in case of moderate congestion
+        • Complement of Fast Retransmit
+        • Mode entered after 3 duplicate ACKs
+        • As usual, set ssthresh= FlightSize/2
+        • Retransmit lost packet
+        • Window inflation: cwnd= ssthresh + ndup (number of
+        duplicate ACKs received)
+        • This allows the transmission of new segments
+        • Window deflation: after the reception of the missing
+        ACK (one RTT later) ??????
+        • Skip Slow Start, enter Congestion Avoidance
+        """
+    #------------------------------------------------------------------------------------------------------------------
+
+
+
+    
     while dataToSend:
 
-        #TIMEOUT EVENT
+        #--------------------------------------------------TIMEOUT HANDLER--------------------------------------------------------
         offTime = time.perf_counter()
-        if offTime - inTime > timeout_time :
+        if offTime - inTime > timeout_time : #Lost packets detected : 
+            print("PACKET LOST DETECTION : TIMEOUT | TimeLimit:"+str(timeout_time)+" | reSend Segment:"+str(send_base)+" to "+str(nextseqnum-1))
+            lost_packet_handler()
             inTime = time.perf_counter()
-            for i in range(send_base,nextseqnum):
+            for i in range(send_base,nextseqnum): #all in flight packets
                 segment = segments[i-1]
                 dataSock.sendto(segment, addr )
-                print("segment sended after timeout"+str(i))
+        #---------------------------------------------------------------------------------------------------------------------------
+
 
         #reset list of file descriptors
         inputs = [ dataSock ]
@@ -317,63 +362,75 @@ def send_segments_GBN(segments,dataSock, addr ):
         #unblocking poll of sockets
         readable, writable, _ = select.select(inputs, outputs, [], 0)
         
-        #RECEIVING SEGMENTS
+
+        #----------------------------------------------RECEIVING SEGMENTS----------------------------------------------------------
         if len(readable)!=0:
             ackSegment, addr = dataSock.recvfrom(9)
             ackSegSeqNum = int(ackSegment[3:])
-            fast_rtx(ackSegSeqNum,send_base,dataSock,addr)#<== FAST RTX 0m3,939s
-            if ackSegSeqNum == len(segments)-1:
-                #si l'ackitement reçu est l'avant dernier numéro de seq
+            print(ackSegSeqNum) #DEBUG
+
+            #--------congestion Protocols for received packets---------
+            #fast_rtx(ackSegSeqNum) #FAST RTX
+            #slow_start(ackSegSeqNum)
+            #congestion_avoidance(ackSegSeqNum)
+            #----------------------------------------------------------
+            
+           
+            #-------tcp base protocol--------------
+            if ackSegSeqNum == len(segments)-1: #si l'ackitement reçu est l'avant dernier numéro de seq : On arrête d'envoyer
                 envoieFin = True
-                print("Last Segment was acked : %s, file transission completed" % ackSegSeqNum)
+                print("ACK RECEIVED: Last Segment was acked : %s, file transission completed" % ackSegSeqNum)
+            
             elif ackSegSeqNum >= send_base:
                 send_base = ackSegSeqNum + 1
-                print("received ack: %s | send_base: %s" % (ackSegment[3:],send_base))
-                SampleRTT = time.perf_counter() - RTT_time[ackSegSeqNum-1]
-                if send_base == nextseqnum :
-                    #si on a tout reçu
+                print("ACK RECEIVED: received ack:%s | send_base:%s" % (ackSegment[3:],send_base))
+                print("---------------"+str(send_base)+"---------------"+str(nextseqnum)) #DEBUG
+                
+                #SampleRTT = time.perf_counter() - RTT_time[ackSegSeqNum-1]
+                SampleRTT = time.perf_counter() - RTT_time
+                timeout_estimation()
+
+                if send_base == nextseqnum : #si on a tout reçu
                     inTime = 0
-                else:
-                    #si il y a toujours des packet in flight
-                    # PB : SAMPLE RTT FOR SPECIFIC SEQ NUM, NOT INTO ACCOUNT TIMEOUTE
+
+                else: #si il y a toujours des packet in flight : restart clock
                     inTime = time.perf_counter()
+                    # PB : SAMPLE RTT FOR SPECIFIC SEQ NUM, NOT INTO ACCOUNT TIMEOUTE(?)
+                    #two strategies : packet by packet --> if random packet droped by , singular packet pb
+                    #                   N --> if the globality of packet is shit
+            #-----------------------------------------------------------------------------    
+        #-------------------------------------------------------------------------------------------------------------------------
                 
         
-        #SENDING SEGMENTS
-        if len(writable)!=0 :
-            if envoieFin :
-                #si tout les segments ont été reçu
+
+
+
+
+        #------------------------------------SENDING SEGMENTS---------------------------------------------------------------
+        if len(writable)!=0:
+            if envoieFin : #si tout les segments ont été reçu
                 message = b"FIN"
                 dataSock.sendto(message, addr )
                 dataToSend = False
-                print("FIN sended")
-            elif nextseqnum == len(segments) + 1:
-                #si tou les segments ont été envoyés
+                print("SEGMENT SENT: FIN sent")
+
+            elif nextseqnum == len(segments) + 1: #si tou les segments ont été envoyés
                 pass
-            elif nextseqnum < send_base + min(N,cwnd):
-                #si le prochain segment à envoyer est inférieur à la taille de fenêtre + premier seq de in flight seg
+
+            elif nextseqnum < send_base + min(N,cwnd):  #si le prochain segment à envoyer est inférieur à la taille de fenêtre + premier seq de in flight seg : on envoye
                 segment = segments[nextseqnum-1]
                 dataSock.sendto(segment, addr )
-                RTT_time[nextseqnum-1] = time.perf_counter()
-                if(send_base == nextseqnum):
-                    #si le sgment avant de celui qu'on va envoyer a été ecquité (aucun in flight segment)
+                #RTT_time[nextseqnum-1] = time.perf_counter()
+                RTT_time = time.perf_counter()
+                if(send_base == nextseqnum): #si le sgment avant de celui qu'on va envoyer a été ecquité (aucun in flight segment) : restart clock
                     inTime = time.perf_counter()
                 nextseqnum = nextseqnum + 1
-                print("Seg sended. Nextseqnum: "+str(nextseqnum))
-            else:
-                pass#refuse data
+                print("SEGMENT SENT: Nextseqnum:"+str(nextseqnum))
+            
+            else: #refuse data
+                pass
+        #------------------------------------------------------------------------------------------------------------------------
         
-        
-        #TIMEOUT CHANGEMENT:
-        #RTT estimation : SampleRTT: measured time from segment transmission until ACK receipt, ignore retransmissions
-        EstimatedRTT = (1 - A)*EstimatedRTT + A*SampleRTT
-        #safety margin : estimate SampleRTT deviation from EstimatedRTT
-        DevRTT = (1-B)*DevRTT +B*abs(SampleRTT-EstimatedRTT)
-        #timeout to use is the sum of both : 
-        timeout_time = EstimatedRTT + 4*DevRTT
-        
-        #if receive 4 same acks : rtx seg with seq num = ack +1 | resend unacked segment with smallest seq num
-        #FAST RETRANSMIT
         
 
 
@@ -452,20 +509,15 @@ if __name__ == "__main__":
         dataSock = open_new_data_socket(PUBLIC_UDP_IP,PRIVATE_PORT)
         three_way_handshake(publicSock, addr, PRIVATE_PORT)
 
-        #Get the name of the file requested
         data, addr = dataSock.recvfrom(1024)
         file_name = data.decode().strip('\x00')
         print("File requested by client: ", str(file_name))
 
-        #fragment the file
         print("framgenting file: ", file_name)
         segments = segment_file(file_name)
 
-        #send each file in "Stop-and-Go" algorithm
         print("sending file to client")
-        #send_segments_stop_go(segments,dataSock,addr)
-        send_segments_GBN(segments, dataSock, addr)
-        # pb : he finishes before receiving the last ack
+        GBN(segments, dataSock, addr)
        
 
         """
